@@ -92,7 +92,8 @@ class GameViewSet(viewsets.ModelViewSet):
 
             # Scale rebounds, assists, steals, blocks realistically
             rebounds = int((player.offensive_rebounding*0.4 + player.defensive_rebounding*0.6) * performance / 10)
-            assists = int((player.pass_accuracy*0.3 + player.ball_handle*0.2) * performance / 20)
+            assist_base = int((player.pass_accuracy*0.3 + player.ball_handle*0.2) * performance / 10)
+            assists = int(assist_base * random.uniform(0.8, 1.3))
             steals = int(player.steal * performance / 30)
             blocks = int(player.block * performance / 25)
             turnovers = max(0, int(5 - ((player.ball_handle + player.pass_accuracy)/40) * performance))
@@ -127,16 +128,18 @@ class GameViewSet(viewsets.ModelViewSet):
         away_off, away_def = team_off_def(away_team)
 
         # Normalize team factors to target realistic scores
-        # Average points per player ~10-20, team ~60-110
-        home_factor = home_off / (home_off + away_def + 50)  # +50 prevents explosion
+        home_factor = home_off / (home_off + away_def + 50)
         away_factor = away_off / (away_off + home_def + 50)
+
+        # Game pace factor (affects both teams)
+        pace = random.uniform(0.8, 1.2)  # slower or faster games
 
         # -------------------------------
         # Simulate player box scores
         # -------------------------------
-        home_box = [simulate_player_stats(p, team_off_factor=home_factor*15, opp_def_factor=away_def/100)
+        home_box = [simulate_player_stats(p, team_off_factor=home_factor*8*pace, opp_def_factor=away_def/100)
                     for p in home_team.players.all()]
-        away_box = [simulate_player_stats(p, team_off_factor=away_factor*15, opp_def_factor=home_def/100)
+        away_box = [simulate_player_stats(p, team_off_factor=away_factor*8*pace, opp_def_factor=home_def/100)
                     for p in away_team.players.all()]
 
         # -------------------------------
@@ -172,6 +175,7 @@ class GameViewSet(viewsets.ModelViewSet):
             "home_box": home_box,
             "away_box": away_box,
         }, status=status.HTTP_201_CREATED)
+
 
 @api_view(["POST"])
 def create_league(request):
