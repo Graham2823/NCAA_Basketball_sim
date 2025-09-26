@@ -29,8 +29,8 @@ class LeagueViewSet(viewsets.ModelViewSet):
         for i in range(4):
             team = Team.objects.create(name=f"Team {i+1}", league=league)
 
-            # generate 5 players and assign
-            for _ in range(5):
+            # generate 15 players and assign
+            for _ in range(15):
                 data = generate_player()
                 player = Player.objects.create(**data, recruiting_class=None)  # not tied to recruiting class
                 team.players.add(player)
@@ -57,7 +57,7 @@ class GameViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"])
     def simulate(self, request):
         """
-        Simulate a realistic college basketball game between two teams with box scores.
+        Simulate a realistic college basketball game between two teams with bench rotation.
         Expects JSON: { "home_team_id": 1, "away_team_id": 2 }
         """
         home_id = request.data.get("home_team_id")
@@ -69,12 +69,13 @@ class GameViewSet(viewsets.ModelViewSet):
         except Team.DoesNotExist:
             return Response({"error": "Invalid team IDs"}, status=status.HTTP_400_BAD_REQUEST)
 
-        def simulate_player_stats(player, team_off_factor, opp_def_factor):
-            """Simulate individual stats including boom games."""
-            performance = random.uniform(0.85, 1.15)
+        # -------------------------
+        # Player stat simulation
+        # -------------------------
+        def simulate_player_stats(player, minutes, team_off_factor, opp_def_factor):
+            performance = random.uniform(0.95, 1.05)
 
-            # Base points calculation
-            base_points = (
+            productivity = (
                 player.close_shot * 0.25 +
                 player.driving_layup * 0.15 +
                 player.driving_dunk * 0.10 +
@@ -83,36 +84,33 @@ class GameViewSet(viewsets.ModelViewSet):
                 player.free_throw * 0.10
             ) * performance * team_off_factor / (opp_def_factor + 1)
 
-            # Boom game chance: 5% chance to score 1.5–2x more
-            if random.random() < 0.05:
-                boom_multiplier = random.uniform(1.5, 2.0)
-                points = int(base_points * boom_multiplier)
-            else:
-                points = int(base_points)
+            points = productivity * (minutes / 40)
 
-            # Scale rebounds, assists, steals, blocks realistically
-            rebounds = int((player.offensive_rebounding*0.4 + player.defensive_rebounding*0.6) * performance / 10)
-            assist_base = int((player.pass_accuracy*0.3 + player.ball_handle*0.2) * performance / 10)
-            assists = int(assist_base * random.uniform(0.8, 1.3))
-            steals = int(player.steal * performance / 30)
-            blocks = int(player.block * performance / 25)
-            turnovers = max(0, int(5 - ((player.ball_handle + player.pass_accuracy)/40) * performance))
+            if random.random() < 0.05:
+                points *= random.uniform(1.4, 1.8)
+
+            rebounds = (player.offensive_rebounding*0.4 + player.defensive_rebounding*0.6) * performance / 8 * (minutes / 40)
+            assists = (player.pass_accuracy*0.3 + player.ball_handle*0.2) * performance / 5 * (minutes / 40)
+            steals = player.steal * performance / 25 * (minutes / 40)
+            blocks = player.block * performance / 20 * (minutes / 40)
+            turnovers = max(0, (minutes / 40) * (5 - (player.ball_handle + player.pass_accuracy)/50) * performance)
 
             return {
                 "player_id": player.id,
                 "name": player.name,
                 "position": player.position,
-                "points": points,
-                "rebounds": rebounds,
-                "assists": assists,
-                "steals": steals,
-                "blocks": blocks,
-                "turnovers": turnovers,
+                "minutes": round(minutes),
+                "points": round(points),
+                "rebounds": round(rebounds),
+                "assists": round(assists),
+                "steals": round(steals),
+                "blocks": round(blocks),
+                "turnovers": round(turnovers),
             }
 
-        # -------------------------------
-        # Compute team offensive/defensive strength
-        # -------------------------------
+        # -------------------------
+        # Team strengths
+        # -------------------------
         def team_off_def(team):
             offense = sum(
                 p.three_point_shot + p.mid_range_shot + p.close_shot + p.driving_layup + p.driving_dunk
@@ -127,32 +125,56 @@ class GameViewSet(viewsets.ModelViewSet):
         home_off, home_def = team_off_def(home_team)
         away_off, away_def = team_off_def(away_team)
 
-        # Normalize team factors to target realistic scores
         home_factor = home_off / (home_off + away_def + 50)
         away_factor = away_off / (away_off + home_def + 50)
 
-        # Game pace factor (affects both teams)
-        pace = random.uniform(0.8, 1.2)  # slower or faster games
+        # -------------------------
+        # Simulate team with 200 minutes
+        # -------------------------
+        def simulate_team(team, team_factor, opp_def_factor):
+            players = sorted(team.players.all(), key=lambda p: p.overall, reverse=True)
+            starters = players[:5]
+            bench = players[5:10]
 
-        # -------------------------------
-        # Simulate player box scores
-        # -------------------------------
-        home_box = [simulate_player_stats(p, team_off_factor=home_factor*8*pace, opp_def_factor=away_def/100)
-                    for p in home_team.players.all()]
-        away_box = [simulate_player_stats(p, team_off_factor=away_factor*8*pace, opp_def_factor=home_def/100)
-                    for p in away_team.players.all()]
+            total_minutes = 200.0
+            box = []
 
-        # -------------------------------
-        # Compute team total scores
-        # -------------------------------
+            # Starters: 85% of total minutes, weighted by overall
+            starter_overall_sum = sum(p.overall for p in starters)
+            starter_minutes = [total_minutes * (p.overall / starter_overall_sum) * 0.85 for p in starters]
+            total_starter = sum(starter_minutes)
+            remaining_minutes = total_minutes - total_starter
+
+            # Bench: top 3–5 players, remaining minutes weighted by overall
+            bench_players = bench[:random.randint(3, 5)]
+            bench_overall_sum = sum(p.overall for p in bench_players) if bench_players else 1
+            bench_minutes = [remaining_minutes * (p.overall / bench_overall_sum) for p in bench_players]
+
+            # Combine players
+            all_players = starters + bench_players
+            all_minutes = starter_minutes + bench_minutes
+
+            # Scale slightly to hit exactly 200
+            scale = total_minutes / sum(all_minutes)
+            all_minutes = [m * scale for m in all_minutes]
+
+            # Simulate stats
+            for p, mins in zip(all_players, all_minutes):
+                box.append(simulate_player_stats(p, mins, team_factor*20, opp_def_factor/100))
+
+            return box
+
+        home_box = simulate_team(home_team, home_factor, away_def)
+        away_box = simulate_team(away_team, away_factor, home_def)
+
+        # -------------------------
+        # Team totals
+        # -------------------------
         home_score = sum(p['points'] for p in home_box)
         away_score = sum(p['points'] for p in away_box)
 
         winner = home_team if home_score >= away_score else away_team
 
-        # -------------------------------
-        # Save game to DB
-        # -------------------------------
         game = Game.objects.create(
             league=home_team.league,
             home_team=home_team,
@@ -162,9 +184,6 @@ class GameViewSet(viewsets.ModelViewSet):
             winner=winner,
         )
 
-        # -------------------------------
-        # Return response with box scores
-        # -------------------------------
         return Response({
             "game_id": game.id,
             "home_team": home_team.name,
@@ -175,6 +194,8 @@ class GameViewSet(viewsets.ModelViewSet):
             "home_box": home_box,
             "away_box": away_box,
         }, status=status.HTTP_201_CREATED)
+
+
 
 
 @api_view(["POST"])
