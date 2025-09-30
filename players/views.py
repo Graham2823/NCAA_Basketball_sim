@@ -52,8 +52,28 @@ def get_recruiting_class(request, class_id):
 
 @api_view(['GET'])
 def list_players(request):
-    """List all players in DB"""
-    players = Player.objects.all().order_by('-potential')
+    """List all players in DB with optional sorting"""
+    # Get sorting parameters from query string
+    sort_by = request.GET.get('sort_by', 'overall')  # default to overall
+    sort_order = request.GET.get('sort_order', 'desc')  # default to descending
+    
+    # Validate sort_by field - add 'stars' as an alias for 'overall'
+    valid_fields = ['overall', 'potential', 'name', 'state', 'position', 'stars']
+    if sort_by not in valid_fields:
+        sort_by = 'overall'
+    
+    # Map 'stars' to 'overall' since stars are based on overall rating
+    if sort_by == 'stars':
+        sort_by = 'overall'
+    
+    # Validate sort_order
+    if sort_order not in ['asc', 'desc']:
+        sort_order = 'desc'
+    
+    # Apply sorting
+    order_prefix = '-' if sort_order == 'desc' else ''
+    players = Player.objects.all().order_by(f'{order_prefix}{sort_by}')
+    
     serializer = PlayerSerializer(players, many=True)
     return Response(serializer.data)
 
